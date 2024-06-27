@@ -17,8 +17,8 @@ This project is an email automation tool that interacts with Gmail to categorize
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-repo/email-automation-tool.git
-   cd assignment
+   git clone git@github.com:Subrata-2002/assignment_reachinbox.git
+   cd assignment_reachinbox
 
 2. Install dependencies:
    ```bash
