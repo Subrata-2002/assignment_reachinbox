@@ -1,44 +1,37 @@
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
-
-
-
 import express from 'express';
-const app = express();
-
-
-
-// require('dotenv').config();
 import dotenv from "dotenv";
 dotenv.config();
 
-//all the secret items must be kept in env folder
+const app = express();
+const port = 3000;
 
-const ClientId = process.env.CLIENT_ID;
-const ClientSecret = process.env.CLIENT_SECRET;
-const redirecturl = 'http://localhost:3000/oauth2callback';
-
-
-
-//keeping secrets open just for testing purpose
-
-// const redirecturl = 'http://localhost:3000/oauth2callback';
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const REDIRECT_URL = 'http://localhost:3000/oauth2callback';
 
 
-///STEP 1
-//setting up the google outh2
+// setting up the google Oauth2
 
 const oAuth2Client = new OAuth2Client(
-    ClientId,
-    ClientSecret,
-    redirecturl
+    CLIENT_ID, 
+    CLIENT_SECRET, 
+    REDIRECT_URL
 );
 
-//
+
+
+// here authUrl generates the URL that users visit to authorize the app to access their Gmail.
 const authUrl = oAuth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/gmail.modify']
 });
+
+
+app.get("/",(req,res)=>{
+    res.send("<h1>Hello</h1>")
+})
 
 
 
@@ -47,346 +40,213 @@ app.get('/login', (req, res) => {
 });
 
 
-// finally we get redirected here
 
 app.get('/oauth2callback', async (req, res) => {
 
-    const code = req.query.code;
-    const { tokens } = await oAuth2Client.getToken(code);
-    oAuth2Client.setCredentials(tokens);
+    try {
+         const code = req.query.code; //here i extracts the authorization code from the query string.
+        const { tokens } = await oAuth2Client.getToken(code);
+        oAuth2Client.setCredentials(tokens);
 
-    const gmail = google.gmail(
-        {
-            version: 'v1',
-            auth: oAuth2Client
-        }
-    );
+        const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
 
+        // console.log("mygmail is "+JSON.stringify(gmail));
 
-    // this function will get the mail from the string which is generally of the format (Name <mail@gmail.com>)
-    // so i need to extraxt the mail@gmail.com
+        const unreadEmails = await getUnreadEmails(gmail);
+        await categorizeAndRespond(gmail, unreadEmails);
 
-    function getMail(str) {
-        const mail = str
-        let flag = false
-        let receiverMail = ""
-        for (let j = 0; j < mail.length; j++) {
+        res.send("Responded to unread emails are done... :)");
 
-            if (mail[j] === '>') {
-                break;
-            }
-            if (flag) receiverMail += mail[j]
-
-            if (mail[j] === '<') {
-                flag = true
-            }
-
-
-
-        }
-        //if the mail is directly given
-        //can happen in some of the cases(some of the header payloads just gave the mail,found it out while trying)
-        if (receiverMail.length === 0) {
-
-            receiverMail = mail
-
-        }
-
-        return receiverMail
     }
+     catch (error) {
+        console.error("Error in OAuth2 callback: ", error);
+        res.status(500).send("An error occurred");
+    }
+});
 
 
-    // Send reply to email
-    async function send_Reply(email, receiverMail) {
+const getUnreadEmails = async (gmail) => {
+    try {
+        //here i call the gmail api to get the all unread message list 
 
-        // this is the message object
-        // for the enhancement purpose this this message could also be dyanamic/ taking the inputs an all 
-        const message = {
-            to: receiverMail,
-            subject: 'Backend intern',
-            text: 'Cannot talk right now, but I Think I can be the perfect fit for the intern you are looking for and join you after vacations'
-        };
+        const res = await gmail.users.messages.list({
+            userId: 'me',
+            maxResults: 1, // you can adjust how many result you want to see
+            q: 'is:unread' // use for unread mail
+        });
 
-        // the message should be sent in encoded form
-        // got this stuff through internet 
+        const messages = res.data.messages;
+
+        if (!messages || messages.length === 0) {
+            console.log("There was no unread messages.To get it dont click any mail that you received");
+            return [];
+        }
+
+        const emailDetails = [];
+
+        for (let message of messages) {
+
+            console.log("\n message id is "+message.id)
+
+            const mdata = await gmail.users.messages.get({
+                userId: 'me',
+                id: message.id
+            });
+
+            console.log("\n mdata are "+mdata);
+
+            // got this from google 
+            const headers = mdata.data.payload.headers;
+            const sender = headers.find(header => header.name === 'From').value;
+            const subject = headers.find(header => header.name === 'Subject').value;
+
+            const bodyData = mdata.data.payload.parts.find(part => part.mimeType === 'text/plain')?.body?.data || '';
+            const body = Buffer.from(bodyData, 'base64').toString('utf-8');
+
+            console.log('Message details: ', mdata.data);
+            console.log('Sender name is : ', sender);
+            console.log('Subject of the unread mail is : ', subject);
+
+            console.log("body data is ", body);
+
+            emailDetails.push({
+                id: message.id,
+                threadId: message.threadId,
+                sender: sender,
+                subject: subject,
+                body: body
+            });
+        }
+        // console.log("all emaildetaisl are"+emailDetails);
+
+        return emailDetails;
+
+    } catch (error) {
+        console.error('Error fetching unread emails: ', error);
+        return [];
+    }
+};
+
+
+
+const categorizeAndRespond = async (gmail, emails) => {
+    
+    for (let email of emails) {
+        
+        // console.log("\n email from emialdetails "+email);
+
+        const category = categorizeEmail();
+        console.log(`Email classified as: ${category}`);
+
+        const labelId = await getOrCreateLabel(gmail, category);
+        await labelEmail(gmail, email.id, labelId);
+
+        const replyText = generateReply(email.body, category);
+        await sendReply(gmail, email, replyText);
+
+        console.log(`Replied to email from ${email.sender} with category ${category}`);
+    }
+};
+
+// Simulating categorization of the email
+const categorizeEmail = () => {
+    const categories = ['Interested', 'Not Interested', 'More Information'];
+    // Mock categorization logic
+    return categories[Math.floor(Math.random() * categories.length)];
+};
+
+
+//here this function  interacts with the Gmail API to either retrieve an existing 
+// label or create a new one if it doesn't already exist
+
+const getOrCreateLabel = async (gmail, labelName) => {
+    try {
+        const res = await gmail.users.labels.list({ userId: 'me' });// here gmail api list all the label of the user
+
+        //Suppose here are the list of all lebel with id  [
+        //     { id: '1', name: 'Work' },
+        //     { id: '2', name: 'Personal' },
+        //     { id: '3', name: 'Archive' }
+        // ]
+
+        let labelId = res.data.labels.find(label => label.name === labelName)?.id;
+        // now here what happens is (suppose i assume "Important" as lebel)
+        // now it findswith this lebel name , is not in the list, labelId will be undefined.
+        //or if already in there then it returns the id.
+
+
+        //if dont get then it create one
+        if (!labelId) {
+            const res = await gmail.users.labels.create({
+                userId: 'me',
+                requestBody: { name: labelName }
+            });
+            // { id: '4', name: 'Important' }
+
+            labelId = res.data.id;
+        }
+
+        return labelId;
+    } catch (error) {
+        console.error('Error creating or retrieving label:', error);
+        return null;
+    }
+};
+
+
+// function labels a specific email in a Gmail account and removes unread level
+
+const labelEmail = async (gmail, emailId, labelId) => {
+    try {
+        await gmail.users.messages.modify({
+            userId: 'me',
+            id: emailId,
+            requestBody: {
+                addLabelIds: [labelId],//The Gmail API adds the label with ID 67890 to the email with ID 12345.
+                removeLabelIds: ['UNREAD']
+            }
+        });
+    } catch (error) {
+        console.log("wait!! got error in labelEmail fun :)", error);
+    }
+};
+
+
+// Simulating generation of a reply based on the category
+const generateReply = (emailBody, category) => {
+    const replies = {
+        'Interested': 'Thank you for your interest! We will get back to you shortly.',
+        'Not Interested': 'Thank you for reaching out. We respect your decision.',
+        'More Information': 'Could you please specify the information you need? We are here to help!'
+    };
+    return replies[category];
+};
+
+
+const sendReply = async (gmail, email, replyText) => {
+    try {
         const encodedMessage = Buffer.from(
-            `To: ${message.to}\n` +
-            `Subject: ${message.subject}\n` +
-            `Content-Type: text/plain; charset=UTF-8\n` +
-            `\n` +
-            `${message.text}`,
+            `To: ${email.sender}\n` +
+            `Subject: Re: ${email.subject}\n` +
+            `Content-Type: text/plain; charset=UTF-8\n\n` +
+            `${replyText}`,
             'utf-8'
         ).toString('base64');
 
-        const response = await gmail.users.messages.send({
+        // The function sends the email using the Gmail API
+        await gmail.users.messages.send({
             userId: 'me',
-            resource: {
-                raw: encodedMessage
-            },
-            threadId: email.threadId
-        });
-        return response.data;
-    }
-
-    // this is the senders email whose emails we want to reply
-    // this app works on the test users setted up by me only
-    //there could have been methods for dyanamically setting it
-    // 1st-could have taken a form input
-    // 2nd-get it extracted from the oauth2(tried but could't figure it out (: 
-    const sendersEmail = "rujnabin@gmail.com"
-
-
-
-    // first time thread
-    // as given in the challenge the replies must be sent to only those thread where reply is not sent earlier
-    async function detectNewThread(email) {
-        // got the thread by this
-        const res = await gmail.users.threads.get({
-            userId: 'me',
-            id: email.threadId
-        });
-        const thread = res.data;
-        const messages = thread.messages;
-        // this is the reciever's email 
-        let emailExtracted = "";
-
-        for (let i = 0; i < messages.length; i++) {
-
-            console.log(messages[i].payload.headers)
-            // what this does is it will find if the thresd is replied already ever before
-            const mailString = messages[i].payload.headers.find(header => header.name === 'From').value
-            emailExtracted = getMail(mailString)
-            console.log(emailExtracted);
-            if (emailExtracted.includes(sendersEmail)) {
-                return [false, "don't send the mail"];
+            requestBody: {
+                raw: encodedMessage,
+                threadId: email.threadId
             }
-        }
-
-      const  ls = [true, emailExtracted];
-
-        // so an array is returned in order to avoid redundency
-        // as if it is a new thread we need to send message to the specific email address from which the  email arrived
-        // this could be accessed by the second element of the array 
-
-
-        return ls;
-
-
-    }
-
-    // this function is to get the unreademails
-
-    async function unreaded_mails() {
-        const res = await gmail.users.messages.list({
-            userId: 'me',
-            q: 'is:unread'
         });
-
-        return res.data.messages;
+    } catch (error) {
+        console.error('Error sending reply:', error);
     }
-
-    
-    async function addLabel(email) {
-
-        const label = {
-            name: 'Intern'
-        };
+};
 
 
-        let flag = true;
-        let labelId = "";
-
-        // Call the Gmail API's users.labels.list method to get a list of labels
-        // belonging to the authorized user
-        gmail.users.labels.list({
-            userId: 'me',
-        }, (err, res) => {
-
-            if (err) {
-                console.error(err);
-                console.log('mil gya error');
-                return;
-            }
-
-            // Iterate 
-            res.data.labels.forEach((ele) => {
-                // If the label name matches "Intern", set labelId to the label's ID and
-                // set flag to false to indicate that the label exists
-                if (ele.name === "Intern") {
-                    labelId = ele.id;
-                    flag = false;
-                }
-            })
-
-
-            if (flag) {
-                gmail.users.labels.create({
-                    userId: 'me',
-                    resource: label
-                }, (err, res) => {
-
-                    if (err) {
-                        console.error(err.errors[0].message);
-                        console.log("kya error yaha hai??(1)")
-                        return;
-                    }
-                    // Set labelId to the newly created label's ID
-                    labelId = res.data.id;
-                });
-            }
-
-
-            gmail.users.messages.get({
-                userId: 'me',
-                id: email.id
-            }, (err, res) => {
-
-                if (err) {
-                    console.error(err);
-                    console.log("kya error yaha hai??(2)")
-                    return;
-                }
-
-                const message = res.data;
-                // Define the newMessage object to specify the label to add and
-                // the label to remove
-                const removeLabel = 'UNREAD';
-                const newMessage = {
-                    addLabelIds: [labelId],
-                    removeLabelIds: [removeLabel]
-                };
-                // Call the Gmail API's users.messages.modify method to apply the
-                // newMessage object to the message
-                gmail.users.messages.modify({
-                    userId: 'me',
-                    id: message.id,
-                    resource: newMessage
-                }, (err, res) => {
-
-                    if (err) {
-                        console.log("kya error yaha hai??(3)")
-                        console.error(err.errors[0].message);
-                        return;
-                    }
-                });
-            });
-        });
-
-        // Return from the function
-        // this was kindof difficult task
-        // took a lot of debugging
-
-        return;
-
-    }
-
-
-
-
-
-
-    // now this function is to generate ramdom time intervals
-    function getRandomTimeInterval() {
-
-        const randomSeconds = Math.floor(Math.random() * (120 - 45 + 1) + 45);
-
-
-        const randomMilliseconds = randomSeconds * 1000;
-
-
-        return randomMilliseconds;
-    }
-
-    // async function mainfunction(){
-    //     const emails = await unreaded_mails();
-    //     if (emails?.length > 0) {
-
-    //         for (let i = 0; i < emails.length; i++) {
-
-    // const email = emails[i];
-
-    // const responsei = await detectNewThread(email)
-    // // console.log(responsei);
-    // // the responsie is a array whose first value tells if the emails should be sent or not
-    // // and the second value tells if the email should be send then the reciver's address
-
-    // const flag = responsei[0]
-
-    // if (flag) {
-
-    //     // const receiverMail = responsei[1]
-    //     //here we can check before repling that if in case it has been replied earlier
-    //     // the send_reply takes two arguments the second one is the recivers mails 
-    //     await send_Reply(email, responsei[1]);
-    //     // then add the label
-    //     await addLabel(email);
-    //             
-
-    //             }
-    //         }
-    //     }
-
-    // }
-
-
-    // This keeps on running theprogram repeatedly after a delay of random intervals
-
-    // setInterval(mainfunction , getRandomTimeInterval())
-
-
-
-
-
-    setInterval(async () => {
-
-        const emails = await unreaded_mails();
-        console.log(emails);
-
-        // here the question was a little unclear to me as it was written that 
-        // only one email should be senyt to one email
-        // if it means that only one email should be sent to one email thread
-        //then this code works fine
-        // or else
-        //if it means that one response to one mail address
-        // then in that case we can use SET DATA STRUCTURE here to check weather or not that email is previously replied or not  
-        
-        if (emails?.length !== 0) {
-
-            for (let i = 0; i < emails.length; i++) {
-                const email = emails[i];
-
-                const responsei = await detectNewThread(email)
-
-                // console.log(responsei);
-                // the responsie is a array whose first value tells if the emails should be sent or not
-                // and the second value tells if the email should be send then the reciver's address
-
-                const flag = responsei[0]
-
-                if (flag) {
-
-                    // const receiverMail = responsei[1]
-                    //here we can check before repling that if in case it has been replied earlier
-                    // the send_reply takes two arguments the second one is the recivers mails 
-
-                    await send_Reply(email, responsei[1]);
-
-                    // then add the label
-
-                    await addLabel(email);
-
-                }
-            }
-        }
-    }
-        , 6000)
-
-
-    res.send("Your messages are being replied");
-
-
-});
-
-app.listen(3000, () => {
-    console.log('Running at Port 3000');
+app.listen(port, () => {
+    console.log("Server is running...");
 });
