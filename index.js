@@ -141,7 +141,7 @@ const categorizeAndRespond = async (gmail, emails) => {
         const labelId = await getOrCreateLabel(gmail, category);
         await labelEmail(gmail, email.id, labelId);
 
-        const replyText = generateReply(email.body, category);
+        const replyText = generateReply(category);
         await sendReply(gmail, email, replyText);
 
         console.log(`Replied to email from ${email.sender} with category ${category}`);
@@ -194,7 +194,7 @@ const getOrCreateLabel = async (gmail, labelName) => {
 };
 
 
-// function labels a specific email in a Gmail account and removes unread level
+//this function add labels to a specific email in a Gmail account and removes unread level
 
 const labelEmail = async (gmail, emailId, labelId) => {
     try {
@@ -202,7 +202,7 @@ const labelEmail = async (gmail, emailId, labelId) => {
             userId: 'me',
             id: emailId,
             requestBody: {
-                addLabelIds: [labelId],//The Gmail API adds the label with ID 67890 to the email with ID 12345.
+                addLabelIds: [labelId],// suppose The Gmail API adds the label with ID 67890 to the email with ID 12345.
                 removeLabelIds: ['UNREAD']
             }
         });
@@ -213,7 +213,7 @@ const labelEmail = async (gmail, emailId, labelId) => {
 
 
 // Simulating generation of a reply based on the category
-const generateReply = (emailBody, category) => {
+const generateReply = ( category) => {
     const replies = {
         'Interested': 'Thank you for your interest! We will get back to you shortly.',
         'Not Interested': 'Thank you for reaching out. We respect your decision.',
